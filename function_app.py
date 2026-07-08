@@ -131,10 +131,10 @@ def submit(req: func.HttpRequest) -> func.HttpResponse:
 
     try:
         pdf_bytes = fill_pdf(payload)
-    except Exception:
+    except Exception as e:
         logging.exception("PDF fill failed")
         return func.HttpResponse(
-            json.dumps({"saved": True, "intakeId": intake_id, "pdf": False}),
+            json.dumps({"saved": True, "intakeId": intake_id, "pdf": False, "error": str(e)}),
             status_code=207, mimetype="application/json",
         )
 

@@ -1,4 +1,4 @@
 azure-functions
 azure-identity
 azure-data-tables
-pypdf>=4.2
+pypdf==3.17.4
