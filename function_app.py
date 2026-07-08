@@ -19,9 +19,12 @@ import json
 import uuid
 import logging
 import datetime as dt
+import base64
 
 import azure.functions as func
 from pypdf import PdfReader, PdfWriter
+
+
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
@@ -31,9 +34,16 @@ TABLE_NAME = os.getenv("TABLE_NAME", "CPSIntakes")
 
 REQUIRED = ("PatientMRN",)
 
+def _template_bytes() -> bytes:
+    try:
+        from template_data import TEMPLATE_B64
+        return base64.b64decode(TEMPLATE_B64)
+    except Exception:
+        with open(TEMPLATE_PATH, "rb") as f:
+            return f.read()
 
 def fill_pdf(payload: dict) -> bytes:
-    reader = PdfReader(TEMPLATE_PATH)
+    reader = PdfReader(io.BytesIO(_template_bytes()))
     writer = PdfWriter()
     writer.append(reader)
 
@@ -164,7 +174,10 @@ def intakes(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def health(req: func.HttpRequest) -> func.HttpResponse:
-    ok = os.path.exists(TEMPLATE_PATH)
+    try:
+        ok = len(_template_bytes()) > 0
+    except Exception:
+        ok = False
     return func.HttpResponse(
         json.dumps({
             "status": "ok" if ok else "degraded",
