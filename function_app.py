@@ -1,133 +1,176 @@
 """
-Azure Function (Python v2 model) — Deterministic Word content-control extractor.
+CPS Digital Intake — Azure Function (Table Storage version).
+All data lives in Azure: each intake is written to Azure Table Storage in the
+same storage account the Function app already uses, via the app's managed
+identity. No SharePoint, no Microsoft Graph, no Entra directory-admin.
 
-Reads the named content controls (<w:sdt> tags) stored inside a .docx and
-returns them as clean {tag: value} JSON. No OCR, no ML, no guessing — the
-result is identical every time for the same file.
+App settings:
+    STORAGE_TABLE_ENDPOINT = https://<youraccount>.table.core.windows.net
+    TABLE_NAME             = CPSIntakes
+    TEMPLATE_PATH          = LDSS-2221A-Fillable-Dropdowns-V4.pdf
 
-HIPAA notes:
-  * Runs inside YOUR Azure subscription, covered by Microsoft's BAA.
-  * Does NOT log field values (PHI). Only counts are logged.
-  * Stateless: nothing is written to disk or storage.
-
-Accepts EITHER:
-  * raw .docx bytes as the request body, OR
-  * JSON body: {"fileContentBase64": "<base64 of the .docx>"}
-    (this is what Power Automate's "Get file content" gives you via $content)
-
-Returns:
-  { "fieldCount": 191, "fields": { "PatientMRN": "1234567890", ... } }
+NOTE ON PHI: LDSS-2221A data is PHI. Production needs a Microsoft BAA,
+encryption in transit/at rest, Entra auth, and audit logging.
 """
-
-import base64
+from __future__ import annotations
 import io
+import os
 import json
+import uuid
 import logging
-import zipfile
-import xml.etree.ElementTree as ET
+import datetime as dt
 
 import azure.functions as func
+from pypdf import PdfReader, PdfWriter
 
-app = func.FunctionApp()
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+TEMPLATE_PATH = os.getenv("TEMPLATE_PATH", "LDSS-2221A-Fillable-Dropdowns-V4.pdf")
+TABLE_ENDPOINT = os.getenv("STORAGE_TABLE_ENDPOINT", "")
+TABLE_NAME = os.getenv("TABLE_NAME", "CPSIntakes")
 
-
-def _q(tag: str) -> str:
-    return f"{{{W}}}{tag}"
-
-
-# A bare unchecked-checkbox glyph means "not checked". Anything else (e.g. "X")
-# means checked. Normalize so downstream gets true booleans for checkbox fields.
-_UNCHECKED_GLYPHS = {"☐", ""}  # ☐ or empty
+REQUIRED = ("PatientMRN",)
 
 
-def _normalize(value: str) -> str:
-    v = (value or "").strip()
-    # Strip a leading/trailing unchecked-box glyph that some controls carry.
-    v = v.replace("☐", "").strip()
-    return v
+def fill_pdf(payload: dict) -> bytes:
+    reader = PdfReader(TEMPLATE_PATH)
+    writer = PdfWriter()
+    writer.append(reader)
 
-
-def extract_content_controls(docx_bytes: bytes) -> dict:
-    """Return {tag: value} for every <w:sdt> content control in the document."""
-    with zipfile.ZipFile(io.BytesIO(docx_bytes)) as z:
-        xml = z.read("word/document.xml")
-    root = ET.fromstring(xml)
-
-    results: dict[str, str] = {}
-    dup_counts: dict[str, int] = {}
-
-    for sdt in root.iter(_q("sdt")):
-        pr = sdt.find(_q("sdtPr"))
-        if pr is None:
-            continue
-        tag_el = pr.find(_q("tag"))
-        if tag_el is None:
-            continue
-        tag = tag_el.get(_q("val"), "")
-        if not tag:
-            continue
-
-        content = sdt.find(_q("sdtContent"))
-        text = ""
-        if content is not None:
-            text = "".join(t.text or "" for t in content.iter(_q("t")))
-        value = _normalize(text)
-
-        # Guard against duplicate tags (a malformed template). Keep both.
-        if tag in results:
-            dup_counts[tag] = dup_counts.get(tag, 1) + 1
-            results[f"{tag}__{dup_counts[tag]}"] = value
+    text_choice = {}
+    checkboxes = {}
+    fields = reader.get_fields() or {}
+    for key, val in payload.items():
+        meta = fields.get(key)
+        if isinstance(val, bool):
+            if val:
+                checkboxes[key] = _checkbox_on_state(meta)
         else:
-            results[tag] = value
+            text_choice[key] = str(val)
 
-    return results
+    for page in writer.pages:
+        if text_choice:
+            writer.update_page_form_field_values(page, text_choice, auto_regenerate=False)
+        if checkboxes:
+            writer.update_page_form_field_values(page, checkboxes, auto_regenerate=False)
 
-
-def _read_docx_from_request(req: func.HttpRequest) -> bytes:
-    body = req.get_body()
-    if not body:
-        raise ValueError("Empty request body.")
-    # Try JSON {"fileContentBase64": "..."} first.
     try:
-        payload = json.loads(body)
-        if isinstance(payload, dict) and "fileContentBase64" in payload:
-            return base64.b64decode(payload["fileContentBase64"])
-    except (ValueError, TypeError):
+        writer.set_need_appearances_writer(True)
+    except Exception:
         pass
-    # Otherwise treat the raw body as the .docx bytes.
-    return bytes(body)
+
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
-@app.route(route="extract", methods=["POST"], auth_level=func.AuthLevel.FUNCTION)
-def extract(req: func.HttpRequest) -> func.HttpResponse:
+def _checkbox_on_state(meta) -> str:
     try:
-        docx_bytes = _read_docx_from_request(req)
-    except Exception as e:
+        states = meta.get("/_States_") if meta else None
+        if states:
+            for s in states:
+                if s not in ("/Off", "Off"):
+                    return s.lstrip("/")
+    except Exception:
+        pass
+    return "Yes"
+
+
+def _table_client():
+    from azure.data.tables import TableServiceClient
+    from azure.identity import DefaultAzureCredential
+
+    if not TABLE_ENDPOINT:
+        raise RuntimeError("STORAGE_TABLE_ENDPOINT app setting is not set.")
+    svc = TableServiceClient(endpoint=TABLE_ENDPOINT, credential=DefaultAzureCredential())
+    svc.create_table_if_not_exists(TABLE_NAME)
+    return svc.get_table_client(TABLE_NAME)
+
+
+def write_table_item(payload: dict) -> str:
+    now = dt.datetime.utcnow()
+    intake_id = now.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
+
+    entity = {
+        "PartitionKey": now.strftime("%Y-%m-%d"),
+        "RowKey": intake_id,
+        "SubmittedAtUtc": now.isoformat(timespec="seconds") + "Z",
+    }
+    for k, v in payload.items():
+        entity[k] = v if isinstance(v, (str, bool, int, float)) else json.dumps(v)
+
+    _table_client().create_entity(entity=entity)
+    return intake_id
+
+
+def read_table_items(limit: int = 200) -> list[dict]:
+    rows = list(_table_client().list_entities())
+    rows.sort(key=lambda e: e.get("SubmittedAtUtc", ""), reverse=True)
+    return [dict(r) for r in rows[:limit]]
+
+
+@app.route(route="submit", methods=["POST"])
+def submit(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        payload = req.get_json()
+    except ValueError:
+        return func.HttpResponse("Body must be JSON.", status_code=400)
+
+    missing = [k for k in REQUIRED if not payload.get(k)]
+    if missing:
         return func.HttpResponse(
-            json.dumps({"error": f"Could not read request body: {e}"}),
-            status_code=400, mimetype="application/json",
+            json.dumps({"error": "missing required fields", "fields": missing}),
+            status_code=422, mimetype="application/json",
         )
 
     try:
-        fields = extract_content_controls(docx_bytes)
-    except zipfile.BadZipFile:
-        return func.HttpResponse(
-            json.dumps({"error": "Body is not a valid .docx (zip) file."}),
-            status_code=400, mimetype="application/json",
-        )
-    except Exception as e:
-        logging.exception("Extraction failed")
-        return func.HttpResponse(
-            json.dumps({"error": f"Extraction failed: {e}"}),
-            status_code=500, mimetype="application/json",
-        )
+        intake_id = write_table_item(payload)
+    except Exception:
+        logging.exception("Table Storage write failed")
+        return func.HttpResponse("Could not save intake.", status_code=502)
 
-    # Log only the count — never the PHI values.
-    logging.info("Extracted %d content-control fields.", len(fields))
+    try:
+        pdf_bytes = fill_pdf(payload)
+    except Exception:
+        logging.exception("PDF fill failed")
+        return func.HttpResponse(
+            json.dumps({"saved": True, "intakeId": intake_id, "pdf": False}),
+            status_code=207, mimetype="application/json",
+        )
 
     return func.HttpResponse(
-        json.dumps({"fieldCount": len(fields), "fields": fields}),
+        pdf_bytes,
+        status_code=200,
+        mimetype="application/pdf",
+        headers={
+            "Content-Disposition": 'inline; filename="LDSS-2221A-completed.pdf"',
+            "X-Intake-Id": intake_id,
+        },
+    )
+
+
+@app.route(route="intakes", methods=["GET"])
+def intakes(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        rows = read_table_items()
+    except Exception:
+        logging.exception("Table Storage read failed")
+        return func.HttpResponse("Could not read intakes.", status_code=502)
+    return func.HttpResponse(
+        json.dumps({"count": len(rows), "intakes": rows}, default=str),
         status_code=200, mimetype="application/json",
+    )
+
+
+@app.route(route="health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def health(req: func.HttpRequest) -> func.HttpResponse:
+    ok = os.path.exists(TEMPLATE_PATH)
+    return func.HttpResponse(
+        json.dumps({
+            "status": "ok" if ok else "degraded",
+            "template": ok,
+            "tableEndpointSet": bool(TABLE_ENDPOINT),
+            "table": TABLE_NAME,
+        }),
+        status_code=200 if ok else 503, mimetype="application/json",
     )
