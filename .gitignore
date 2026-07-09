@@ -1,0 +1,23 @@
+# === Secrets — never commit ===
+# holds the live function key
+config.js
+# Azure Functions local secrets
+local.settings.json
+
+# === Docs that currently embed the live key (keep local, out of git) ===
+README.txt
+CPS-Form-Command-Reference.md
+
+# === PHI / patient data — never commit ===
+intakes.csv
+test.pdf
+
+# === Python / tooling junk ===
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# === Editor / OS junk ===
+.vscode/
+.DS_Store
