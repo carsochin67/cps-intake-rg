@@ -1,4 +1,6 @@
 azure-functions
 azure-identity
 azure-data-tables
+azure-storage-blob
 pypdf==3.17.4
+pikepdf==10.5.1

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Captured Intakes — CPS Digital Intake</title>
+<script src="config.js"></script>
+<style>
+  :root{--blue:#12489e;--line:#d7e2f5;--bg:#f4f8ff;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1c2733;background:#fff;padding:24px}
+  h1{font-size:20px;margin:0 0 4px;color:var(--blue)}
+  .sub{color:#5a6b80;font-size:13px;margin:0 0 18px}
+  .bar{display:flex;gap:10px;align-items:center;margin-bottom:14px}
+  button{font:inherit;font-size:13px;padding:7px 14px;border:1px solid var(--blue);background:var(--blue);color:#fff;border-radius:7px;cursor:pointer}
+  button.ghost{background:#fff;color:var(--blue)}
+  input[type=search]{font:inherit;font-size:13px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;min-width:220px}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:var(--bg);color:var(--blue);font-weight:600;position:sticky;top:0}
+  tr:hover td{background:#fafcff}
+  .pill{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px}
+  .pill.ok{background:#e4f6ea;color:#137a3f}
+  .pill.no{background:#fdf0e0;color:#a15c00}
+  a.dl{display:inline-block;font-size:12px;padding:5px 11px;border:1px solid var(--blue);color:var(--blue);border-radius:6px;text-decoration:none}
+  a.dl:hover{background:var(--blue);color:#fff}
+  a.dl[aria-disabled=true]{border-color:#c7cfda;color:#9aa4b2;pointer-events:none}
+  .msg{font-size:13px;color:#5a6b80;padding:14px 0}
+  .err{color:#b3261e}
+  code{font-size:12px;background:#f1f4f9;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+  <h1>Captured Intakes</h1>
+  <p class="sub">Every submitted LDSS-2221A intake, newest first. Click <b>Download PDF</b> to open the archived copy of the completed form.</p>
+  <div class="bar">
+    <button class="ghost" onclick="load()">↻ Refresh</button>
+    <input type="search" id="q" placeholder="Filter by MRN or intake id…" oninput="render()">
+    <span id="count" class="sub" style="margin:0"></span>
+  </div>
+  <div id="out"><p class="msg">Loading…</p></div>
+
+<script>
+const API_BASE = (window.CPS_CONFIG && window.CPS_CONFIG.API_BASE) || '';
+const API_CODE = (window.CPS_CONFIG && window.CPS_CONFIG.API_CODE) || '';
+function apiUrl(route){
+  const base = (API_BASE || '').replace(/\/+$/, '');
+  return base + '/api/' + route + (API_CODE ? ('?code=' + encodeURIComponent(API_CODE)) : '');
+}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+let ROWS = [];
+
+async function load(){
+  const out = document.getElementById('out');
+  out.innerHTML = '<p class="msg">Loading…</p>';
+  try{
+    const res = await fetch(apiUrl('intakes'));
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    ROWS = data.intakes || [];
+    render();
+  }catch(e){
+    out.innerHTML = '<p class="msg err">Could not load intakes ('+esc(e.message)+'). Check that config.js is present and the backend is reachable.</p>';
+  }
+}
+
+function render(){
+  const out = document.getElementById('out');
+  const q = (document.getElementById('q').value || '').toLowerCase().trim();
+  let rows = ROWS;
+  if(q){
+    rows = rows.filter(r =>
+      (String(r.RowKey||'').toLowerCase().includes(q)) ||
+      (String(r.PatientMRN||'').toLowerCase().includes(q)));
+  }
+  document.getElementById('count').textContent = rows.length + ' of ' + ROWS.length + ' shown';
+  if(!rows.length){ out.innerHTML = '<p class="msg">No intakes to show.</p>'; return; }
+  let h = '<table><thead><tr>'
+    + '<th>Submitted (UTC)</th><th>Patient MRN</th><th>Intake ID</th><th>Records copy</th><th>PDF</th>'
+    + '</tr></thead><tbody>';
+  for(const r of rows){
+    const id = r.RowKey || '';
+    const archived = (r.PdfArchived === true || r.PdfArchived === 'true');
+    const pill = archived
+      ? '<span class="pill ok">saved</span>'
+      : '<span class="pill no">not saved</span>';
+    const link = archived
+      ? '<a class="dl" href="'+esc(apiUrl('pdf/'+id))+'" target="_blank" rel="noopener">Download PDF</a>'
+      : '<a class="dl" aria-disabled="true">Download PDF</a>';
+    h += '<tr>'
+      + '<td>'+esc(r.SubmittedAtUtc||'')+'</td>'
+      + '<td>'+esc(r.PatientMRN||'')+'</td>'
+      + '<td><code>'+esc(id)+'</code></td>'
+      + '<td>'+pill+'</td>'
+      + '<td>'+link+'</td>'
+      + '</tr>';
+  }
+  h += '</tbody></table>';
+  out.innerHTML = h;
+}
+
+load();
+</script>
+</body>
+</html>
