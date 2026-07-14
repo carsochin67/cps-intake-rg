@@ -211,6 +211,7 @@ async function genPdf() {
       .replace(/[^\x00-\xFF]/g, '');
     document.querySelectorAll('[data-f]').forEach(el => {
       const name = el.id, t = el.dataset.f;
+      if (name === 'AdditionalReportDetails') return; // paginated separately so long narratives are never cut off
       try {
         if (t === 'tx') { const v = WA(el.value.trim()); if (!v) return; form.getTextField(name).setText(v); filled++; }
         else if (t === 'ch') { if (!el.value) return; const dd = form.getDropdown(name);
@@ -224,6 +225,23 @@ async function genPdf() {
       try { form.getTextField(nm).setText(WA(_cm[nm])); filled++; }
       catch(e) { console.warn('combo skip', nm, e.message); }
     }
+    // Capture the Additional Report Details narrative + its box, then remove the
+    // field so pdf-lib can't clip a long entry. We redraw it after flatten and
+    // spill any overflow onto appended continuation pages (see below).
+    let narr = { text: '', rect: null, page: null };
+    try {
+      const nel = document.getElementById('AdditionalReportDetails');
+      const nval = nel ? WA(nel.value.trim()) : '';
+      if (nval) {
+        const nf = form.getTextField('AdditionalReportDetails');
+        const nw = nf.acroField.getWidgets()[0];
+        const nr = nw.getRectangle();
+        let np = null; try { const _m = new Map(); pdf.getPages().forEach(pg => _m.set(pg.ref, pg)); np = _m.get(nw.P()); } catch (e) {}
+        if (!np) np = pdf.getPages()[3];
+        narr = { text: nval, rect: nr, page: np };
+        try { form.removeField(nf); } catch (e) {}
+      }
+    } catch (e) { console.warn('narr capture', e.message); }
     // Checkboxes: the official form already prints its own square, and each
     // interactive checkbox widget stamps a second, blue-shaded box on top of
     // it. Remove the checkbox widgets entirely and instead stamp a plain "X"
@@ -268,6 +286,55 @@ async function genPdf() {
     // arrows and clickable fields disappear and the chosen values are baked
     // into the page as plain text. Wrapped so one odd field can't abort it.
     try { form.flatten(); } catch (e) { console.warn('flatten failed', e); }
+    // Redraw the Additional Report Details narrative as plain page text, wrapping
+    // to the box width. Whatever doesn't fit in the on-form box continues onto
+    // appended pages so nothing a worker types is ever lost.
+    if (narr.text) {
+      try {
+        const nfont = await pdf.embedFont(PDFLib.StandardFonts.Helvetica);
+        const size = 9, lh = size * 1.25, pad = 3;
+        const wrap = (str, maxW) => {
+          const out = [];
+          String(str).split(/\r?\n/).forEach(para => {
+            if (!para) { out.push(''); return; }
+            let line = '';
+            para.split(/\s+/).forEach(word => {
+              const tt = line ? line + ' ' + word : word;
+              if (nfont.widthOfTextAtSize(tt, size) <= maxW) { line = tt; return; }
+              if (line) out.push(line);
+              if (nfont.widthOfTextAtSize(word, size) > maxW) {
+                let cur = ''; for (const ch of word) { if (nfont.widthOfTextAtSize(cur + ch, size) <= maxW) cur += ch; else { out.push(cur); cur = ch; } } line = cur;
+              } else line = word;
+            });
+            out.push(line);
+          });
+          return out;
+        };
+        const r = narr.rect;
+        const lines = wrap(narr.text, r.width - pad * 2);
+        const boxCap = Math.max(1, Math.floor((r.height - pad) / lh));
+        const drawLine = (pg, ln, x, yTop, i) => pg.drawText(ln, { x, y: yTop - (i + 1) * lh, size, font: nfont, color: PDFLib.rgb(0, 0, 0) });
+        if (lines.length <= boxCap) {
+          lines.forEach((ln, i) => drawLine(narr.page, ln, r.x + pad, r.y + r.height - pad, i));
+        } else {
+          const shown = boxCap - 1;
+          for (let i = 0; i < shown; i++) drawLine(narr.page, lines[i], r.x + pad, r.y + r.height - pad, i);
+          narr.page.drawText('(continued on attached page)', { x: r.x + pad, y: r.y + r.height - pad - (shown + 1) * lh, size, font: nfont, color: PDFLib.rgb(0.6, 0, 0) });
+          const rest = lines.slice(shown);
+          const PW = 612, PH = 792, mX = 54, mTop = 720, mBot = 60;
+          const pageCap = Math.max(1, Math.floor((mTop - mBot) / lh));
+          let idx = 0, pageNo = 0;
+          while (idx < rest.length) {
+            pageNo++;
+            const p = pdf.addPage([PW, PH]);
+            p.drawText('LDSS-2221A - Additional Report Details (continued, p.' + pageNo + ')', { x: mX, y: PH - 48, size: 10, font: nfont, color: PDFLib.rgb(0, 0, 0) });
+            p.drawLine({ start: { x: mX, y: PH - 54 }, end: { x: PW - mX, y: PH - 54 }, thickness: 0.5, color: PDFLib.rgb(0, 0, 0) });
+            rest.slice(idx, idx + pageCap).forEach((ln, i) => drawLine(p, ln, mX, mTop, i));
+            idx += pageCap;
+          }
+        }
+      } catch (e) { console.warn('narr draw', e.message); }
+    }
     const url = URL.createObjectURL(new Blob([await pdf.save()], {type:'application/pdf'}));
     const w = window.open(url, '_blank');
     if (w) setTimeout(() => { try { w.focus(); w.print(); } catch(e){} }, 900);
