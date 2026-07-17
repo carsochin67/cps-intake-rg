@@ -33,10 +33,14 @@ mkdir -p "$DEST"
 # Use AAD (--auth-mode login) — this is how the Function wrote the blobs
 # (managed identity), and many Function storage accounts have shared-key
 # access disabled, which makes --auth-mode key report ContainerNotFound.
+# --overwrite re-downloads blobs that already exist locally. Without it the
+# batch aborts the moment it hits a file already in $DEST, so re-runs (and the
+# daily auto-sync) would fail once the first PDF had been pulled down.
 az storage blob download-batch \
   --account-name "$ACCT" \
   --source cps-pdfs \
   --destination "$DEST" \
+  --overwrite \
   --auth-mode login
 
 echo "4/4  Done."
