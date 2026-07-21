@@ -7,7 +7,11 @@
 # Re-run any time to refresh the folder with newly submitted intakes.
 set -euo pipefail
 
-DEST="$HOME/Desktop/cps-intake-rg/records-pdfs"
+# Destination lives OUTSIDE ~/Desktop on purpose: macOS TCC guards Desktop/
+# Documents/Downloads, and a background launchd job has no access to them, so a
+# scheduled sync into the Desktop fails with "Operation not permitted". A plain
+# folder in $HOME is not protected, so the daily job can write here freely.
+DEST="$HOME/cps-sync/records-pdfs"
 
 echo "1/4  Using the records Function app..."
 # Two Function apps exist in this subscription; the web form (config.js

@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/carsochin_67/Desktop/cps-intake-rg/sync-records.sh</string>
+        <string>/Users/carsochin_67/cps-sync/sync-records.sh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -22,9 +22,9 @@
         <integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/carsochin_67/Desktop/cps-intake-rg/sync.log</string>
+    <string>/Users/carsochin_67/cps-sync/sync.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/carsochin_67/Desktop/cps-intake-rg/sync.log</string>
+    <string>/Users/carsochin_67/cps-sync/sync.log</string>
     <key>RunAtLoad</key>
     <false/>
 </dict>
